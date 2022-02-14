@@ -20,6 +20,8 @@ pub struct InputSynth {
     xkb_context: xkbcommon::xkb::Context,
 }
 
+unsafe impl Send for InputSynth {}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
