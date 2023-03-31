@@ -43,6 +43,44 @@ extern "C" {
     ) -> usize;
 }
 type Result<T, E = Error> = std::result::Result<T, E>;
+mod xkb_extra {
+    use xkbcommon::xkb::{
+        x11::ffi::{xkb_x11_keymap_new_from_device, xkb_x11_state_new_from_device},
+        Context, Keymap, KeymapCompileFlags, State,
+    };
+
+    #[must_use]
+    pub(super) fn keymap_new_from_device(
+        context: &Context,
+        connection: &x11rb::xcb_ffi::XCBConnection,
+        device_id: i32,
+        flags: KeymapCompileFlags,
+    ) -> Keymap {
+        unsafe {
+            Keymap::from_raw_ptr(xkb_x11_keymap_new_from_device(
+                context.get_raw_ptr(),
+                connection.get_raw_xcb_connection() as *mut _,
+                device_id,
+                flags,
+            ))
+        }
+    }
+
+    #[must_use]
+    pub(super) fn state_new_from_device(
+        keymap: &Keymap,
+        connection: &x11rb::xcb_ffi::XCBConnection,
+        device_id: i32,
+    ) -> State {
+        unsafe {
+            State::from_raw_ptr(xkb_x11_state_new_from_device(
+                keymap.get_raw_ptr(),
+                connection.get_raw_xcb_connection() as *mut _,
+                device_id,
+            ))
+        }
+    }
+}
 impl InputSynth {
     pub fn new() -> Result<Self> {
         let (connection, screen) = XCBConnection::connect(None)?;
@@ -51,13 +89,12 @@ impl InputSynth {
             .reply()?;
 
         let (xtest_major, xtest_minor) = x11rb::protocol::xtest::X11_XML_VERSION;
-        connection.xtest_get_version(xtest_major as _, xtest_minor as _)?.reply()?;
+        connection
+            .xtest_get_version(xtest_major as _, xtest_minor as _)?
+            .reply()?;
         let context = xkbcommon::xkb::Context::new(0);
 
         connection.flush()?;
-        let raw_conn =
-            unsafe { xcb::Connection::from_raw_conn(connection.get_raw_xcb_connection() as _) };
-        raw_conn.into_raw_conn();
         Ok(Self {
             mapping: RefCell::new(Self::get_keymap_state(&connection, &context)?),
             connection,
@@ -77,13 +114,8 @@ impl InputSynth {
             .iter()
             .find(|d| d.device_use == x11rb::protocol::xinput::DeviceUse::IS_X_KEYBOARD)
             .unwrap();
-        let raw_conn =
-            unsafe { xcb::Connection::from_raw_conn(conn.get_raw_xcb_connection() as _) };
-        let mapping =
-            xkbcommon::xkb::x11::keymap_new_from_device(ctx, &raw_conn, device.device_id as _, 0);
-        let mut state =
-            xkbcommon::xkb::x11::state_new_from_device(&mapping, &raw_conn, device.device_id as _);
-        raw_conn.into_raw_conn();
+        let mapping = xkb_extra::keymap_new_from_device(ctx, conn, device.device_id as _, 0);
+        let mut state = xkb_extra::state_new_from_device(&mapping, conn, device.device_id as _);
 
         let mut modifier_keycode = HashMap::new();
         mapping.key_for_each(|map, k| {
@@ -106,12 +138,9 @@ impl InputSynth {
     fn handle_events(&self) -> Result<()> {
         while let Some(event) = self.connection.poll_for_event()? {
             use x11rb::protocol::Event;
-            match event {
-                Event::MappingNotify(_) => {
-                    self.mapping
-                        .replace(Self::get_keymap_state(&self.connection, &self.xkb_context)?);
-                }
-                _ => (),
+            if let Event::MappingNotify(_) = event {
+                self.mapping
+                    .replace(Self::get_keymap_state(&self.connection, &self.xkb_context)?);
             }
         }
         Ok(())
@@ -206,7 +235,7 @@ impl InputSynth {
     pub fn ascii_char(&self, ch: u8) -> Result<()> {
         self.handle_events()?;
         let mut keysym: u16 = ch as _;
-        if ch >= 8 && ch <= 17 {
+        if (8..=17).contains(&ch) {
             // Function keysyms are encoded in X as 0xffxx,
             // we cover the most often used ones here.
             keysym += 0xff00;
